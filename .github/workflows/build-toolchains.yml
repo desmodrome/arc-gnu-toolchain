@@ -1,0 +1,117 @@
+name: Build Toolchains
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: Stringified JSON target list
+        required: false
+        default: >-
+          ["arc32", "arc64"]
+        type: string
+
+      gcc_branch:
+        description: GCC branch name
+        required: false
+        default: arc64
+        type: string
+
+      binutils_branch:
+        description: Binutils branch name
+        required: false
+        default: arc64
+        type: string
+
+      newlib_branch:
+        description: Newlib branch name
+        required: false
+        default: arc64
+        type: string
+
+      glibc_branch:
+        description: glibc branch name
+        required: false
+        default: arc64
+        type: string
+
+env:
+  build_dir: ${{ github.workspace }}/output
+
+jobs:
+  build:
+    name: Building ${{ matrix.target }}-${{ matrix.mode }} toolchain
+    runs-on: ubuntu-18.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [newlib, linux]
+        target: ${{ fromJSON(inputs.targets) }}
+
+        # exclude arc32 bare-metal toolchain because it is built by arc64 multilib toolchain
+        exclude:
+          - { mode: newlib, target: arc32 }
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install apt dependencies
+        run: |
+          sudo apt-get -y update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            automake \
+            autotools-dev \
+            bc \
+            bison \
+            build-essential \
+            curl \
+            flex \
+            gawk \
+            gperf \
+            libgmp-dev \
+            libmpc-dev \
+            libmpfr-dev \
+            libtool \
+            patchutils \
+            texinfo
+
+      - name: Build ${{ matrix.target }}-${{ matrix.mode }} toolchain
+        id: build_toolchain
+
+        run: |
+          if [ "${{ matrix.mode }}" == "linux" ]; then
+            BUILD_FLAGS="--enable-linux"
+            MODE="glibc";
+          else
+            BUILD_FLAGS="--enable-multilib"
+            MODE="elf";
+          fi
+
+          echo ::set-output name=toolchain_name::${{ matrix.target }}-${MODE}
+
+          ${{ github.workspace }}/configure \
+            ${BUILD_FLAGS} \
+            --target=${{ matrix.target }} \
+            --prefix=${{ env.build_dir }} \
+            --disable-qemu \
+            --disable-werror
+
+          cat > build.config <<EOF
+          GCC_BRANCH=${{ inputs.gcc_branch }}
+          BINUTILS_BRANCH=${{ inputs.binutils_branch }}
+          NEWLIB_BRANCH=${{ inputs.newlib_branch }}
+          GLIBC_BRANCH=${{ inputs.glibc_branch }}
+          EOF
+
+          make ${{ matrix.mode }} -j$(nproc)
+
+      - name: Create toolchain archive
+        run: |
+          tar -czvf ${{ steps.build_toolchain.outputs.toolchain_name }}.tar.gz --owner=0 --group=0 -C ${{ env.build_dir }} .
+
+      - name: Upload toolchain archive
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{ steps.build_toolchain.outputs.toolchain_name }}
+          path: ${{ steps.build_toolchain.outputs.toolchain_name }}.tar.gz
+          retention-days: 7
