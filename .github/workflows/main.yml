@@ -1,0 +1,129 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: Stringified JSON target list
+        required: false
+        default: >-
+          ["arc", "arc32", "arc64"]
+        type: string
+
+      gcc_branch:
+        description: GCC branch name
+        required: false
+        default: arc64
+        type: string
+
+      binutils_branch:
+        description: Binutils branch name
+        required: false
+        default: arc64
+        type: string
+
+      newlib_branch:
+        description: Newlib branch name
+        required: false
+        default: arc64
+        type: string
+
+      glibc_branch:
+        description: glibc branch name
+        required: false
+        default: arc64
+        type: string
+jobs:
+  toolchains:
+    uses: ./.github/workflows/build-toolchains.yml
+    with:
+      targets: ${{ github.event.inputs.targets }}
+      gcc_branch: ${{ github.event.inputs.gcc_branch }}
+      binutils_branch: ${{ github.event.inputs.binutils_branch }}
+      newlib_branch: ${{ github.event.inputs.newlib_branch }}
+      glibc_branch: ${{ github.event.inputs.glibc_branch }}
+
+  create-release:
+    needs: toolchains
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      asset_matrix: ${{ steps.asset_names.outputs.asset_matrix }}
+      datestamp: ${{ env.DATESTAMP }}
+    steps:
+      - name: Run Configuration Commands
+        run: |
+          DATESTAMP="$(date --utc '+%Y.%m.%d')"
+          echo "Version: ${DATESTAMP}"
+          # Setup Artifacts Directory
+          ARTIFACTS_DIR="/opt/artifacts/"
+          mkdir -p $ARTIFACTS_DIR
+          # Setup environment variables
+          echo "DATESTAMP=${DATESTAMP}" >> $GITHUB_ENV
+          echo "DATEWORD=$(date --utc '+%B %d, %Y')" >> $GITHUB_ENV
+          echo "ARTIFACTS_DIR=${ARTIFACTS_DIR}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.DATESTAMP }}
+          release_name: "Release: ${{ env.DATEWORD }}"
+          body: |
+            **Automated Release**
+            ${{ env.DATESTAMP }}-release
+          draft: false
+          prerelease: true
+
+      - name: Download Built Artifacts
+        uses: actions/download-artifact@v2
+        with:
+          path: ${{ env.ARTIFACTS_DIR }}
+
+      - name: Designate Asset Names
+        id: asset_names
+        run: |
+          ASSET_MATRIX=$(
+            find ${ARTIFACTS_DIR} -mindepth 2 -maxdepth 2 -type f |
+            awk '{
+              fs_n=split($0, fs, "/")   # Split file paths
+              art_name=fs[fs_n-1]       # Get artifact name
+              fname=fs[fs_n]            # Get file name from the artifact
+              ext = substr(fs[fs_n], index(fs[fs_n],"."))   # File Extension
+              print art_name ":" fname ":" ext # format <artifact name : artifact file : file extension>
+            }' |
+            jq -R -s -c 'split("\n") | .[:-1] | {   # Split by newlines (remove last entry)
+              include: [
+                .[] | split(":") | {    # Put it in JSON format
+                  artifact: .[0],
+                  file: .[1],
+                  extension: .[2]
+                }
+              ]
+            }'
+          )
+          echo "::set-output name=asset_matrix::${ASSET_MATRIX}"
+        shell: bash
+
+  upload-assets:
+    needs: create-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson( needs.create-release.outputs.asset_matrix ) }}
+    name: upload ${{ matrix.artifact }}
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          name: ${{ matrix.artifact }}
+
+      - uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ${{ matrix.file }}
+          asset_name: ${{ matrix.artifact }}-${{ needs.create-release.outputs.datestamp }}${{ matrix.extension }}
+          asset_content_type: application/gzip
